@@ -7,6 +7,8 @@ services:
     volumes:
       - ../config:/app/config:ro
       - ../output:/app/output
+      - ../main.py:/app/main.py:ro
+      - ../html_templates:/app/html_templates:ro
 
     environment:
       - TZ=Asia/Shanghai
@@ -47,3 +49,12 @@ services:
       - CRON_SCHEDULE=${CRON_SCHEDULE:-*/5 * * * *}
       - RUN_MODE=${RUN_MODE:-cron}
       - IMMEDIATE_RUN=${IMMEDIATE_RUN:-true}
+
+  web:
+    image: nginx:alpine
+    container_name: trend-radar-web
+    restart: unless-stopped
+    ports:
+      - "8050:80"
+    volumes:
+      - ..:/usr/share/nginx/html:ro
