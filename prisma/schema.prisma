@@ -1,0 +1,137 @@
+// TrendRadar Prisma Schema
+// This schema matches the PostgreSQL tables created by docker/init.sql
+// Use with Next.js for direct database access
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// News sources/platforms (Toutiao, Baidu, Bilibili, etc.)
+model Source {
+  id           Int        @id @default(autoincrement())
+  platformId   String     @unique @map("platform_id") @db.VarChar(50)
+  platformName String     @map("platform_name") @db.VarChar(100)
+  isActive     Boolean    @default(true) @map("is_active")
+  createdAt    DateTime   @default(now()) @map("created_at")
+
+  headlines  Headline[]
+  dailyStats DailyStat[]
+
+  @@map("sources")
+}
+
+// Individual headlines
+model Headline {
+  id          Int       @id @default(autoincrement())
+  sourceId    Int       @map("source_id")
+  title       String    @db.Text
+  url         String?   @db.Text
+  mobileUrl   String?   @map("mobile_url") @db.Text
+  firstSeenAt DateTime  @map("first_seen_at")
+  lastSeenAt  DateTime  @map("last_seen_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  source      Source                @relation(fields: [sourceId], references: [id])
+  occurrences HeadlineOccurrence[]
+
+  @@unique([sourceId, title])
+  @@index([sourceId], name: "idx_headlines_source")
+  @@index([firstSeenAt], name: "idx_headlines_first_seen")
+  @@index([lastSeenAt], name: "idx_headlines_last_seen")
+  @@map("headlines")
+}
+
+// Track each time a headline appears with its rank
+model HeadlineOccurrence {
+  id         Int      @id @default(autoincrement())
+  headlineId Int      @map("headline_id")
+  rank       Int
+  crawledAt  DateTime @map("crawled_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  headline Headline @relation(fields: [headlineId], references: [id], onDelete: Cascade)
+
+  @@index([headlineId], name: "idx_occurrences_headline")
+  @@index([crawledAt], name: "idx_occurrences_crawled")
+  @@map("headline_occurrences")
+}
+
+// Keyword groups for filtering
+model WordGroup {
+  id              Int         @id @default(autoincrement())
+  groupKey        String      @map("group_key") @db.VarChar(255)
+  maxDisplayCount Int         @default(0) @map("max_display_count")
+  position        Int
+  isActive        Boolean     @default(true) @map("is_active")
+  createdAt       DateTime    @default(now()) @map("created_at")
+
+  words GroupWord[]
+
+  @@index([isActive], name: "idx_word_groups_active")
+  @@map("word_groups")
+}
+
+// Individual words within groups
+model GroupWord {
+  id        Int      @id @default(autoincrement())
+  groupId   Int      @map("group_id")
+  word      String   @db.VarChar(100)
+  wordType  String   @map("word_type") @db.VarChar(20)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  group WordGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@index([groupId], name: "idx_group_words_group")
+  @@map("group_words")
+}
+
+// Push/notification records
+model PushRecord {
+  id            Int      @id @default(autoincrement())
+  pushType      String   @map("push_type") @db.VarChar(50)
+  channel       String   @db.VarChar(50)
+  headlineCount Int?     @map("headline_count")
+  pushedAt      DateTime @map("pushed_at")
+  status        String   @default("success") @db.VarChar(20)
+  errorMessage  String?  @map("error_message") @db.Text
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([pushedAt], name: "idx_push_records_pushed")
+  @@map("push_records")
+}
+
+// Crawl session logs
+model CrawlSession {
+  id             Int       @id @default(autoincrement())
+  startedAt      DateTime  @map("started_at")
+  completedAt    DateTime? @map("completed_at")
+  sourcesSuccess String[]  @map("sources_success")
+  sourcesFailed  String[]  @map("sources_failed")
+  headlineCount  Int?      @map("headline_count")
+  status         String    @default("running") @db.VarChar(20)
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  @@index([startedAt], name: "idx_crawl_sessions_started")
+  @@map("crawl_sessions")
+}
+
+// Daily statistics (pre-computed for performance)
+model DailyStat {
+  id              Int      @id @default(autoincrement())
+  statDate        DateTime @map("stat_date") @db.Date
+  sourceId        Int      @map("source_id")
+  headlineCount   Int?     @map("headline_count")
+  uniqueHeadlines Int?     @map("unique_headlines")
+  avgRank         Decimal? @map("avg_rank") @db.Decimal(5, 2)
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  source Source @relation(fields: [sourceId], references: [id])
+
+  @@unique([statDate, sourceId])
+  @@index([statDate], name: "idx_daily_stats_date")
+  @@map("daily_stats")
+}

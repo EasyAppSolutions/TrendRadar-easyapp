@@ -1,17 +1,45 @@
 services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: trend-radar-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: trendradar
+      POSTGRES_USER: trendradar
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trendradar -d trendradar"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   trend-radar:
     image: wantcat/trendradar:latest
     container_name: trend-radar
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["/app/custom-entrypoint.sh"]
 
     volumes:
+      - ./custom-entrypoint.sh:/app/custom-entrypoint.sh:ro
       - ../config:/app/config:ro
       - ../output:/app/output
       - ../main.py:/app/main.py:ro
       - ../html_templates:/app/html_templates:ro
+      - ../db:/app/db:ro
 
     environment:
-      - TZ=Asia/Shanghai
+      - TZ=America/Edmonton
+      # Database - DB_CONNECTION_STRING takes priority over DATABASE_URL
+      - DB_CONNECTION_STRING=${DB_CONNECTION_STRING:-}
+      - DATABASE_URL=postgresql://trendradar:${DB_PASSWORD:-changeme}@postgres:5432/trendradar
       # 核心配置
       - ENABLE_CRAWLER=${ENABLE_CRAWLER:-}
       - ENABLE_NOTIFICATION=${ENABLE_NOTIFICATION:-}
@@ -58,3 +86,6 @@ services:
       - "8050:80"
     volumes:
       - ..:/usr/share/nginx/html:ro
+
+volumes:
+  postgres_data:

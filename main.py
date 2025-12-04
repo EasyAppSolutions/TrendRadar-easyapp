@@ -11,7 +11,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.header import Header
 from email.utils import formataddr, formatdate, make_msgid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union
 
@@ -652,6 +652,215 @@ def save_titles_to_file(results: Dict, id_to_name: Dict, failed_ids: List) -> st
                 f.write(f"{id_value}\n")
 
     return file_path
+
+
+def save_titles_to_db(results: Dict, id_to_name: Dict, failed_ids: List) -> int:
+    """保存标题到PostgreSQL数据库
+
+    Args:
+        results: 爬取结果 {source_id: {title: {ranks, url, mobileUrl}}}
+        id_to_name: 平台ID到名称的映射
+        failed_ids: 失败的平台ID列表
+
+    Returns:
+        保存的标题数量
+    """
+    try:
+        from db import get_db_connection, get_or_create_source, upsert_headline, save_crawl_session
+    except ImportError:
+        print("警告: 数据库模块未安装，跳过数据库保存")
+        return 0
+
+    crawled_at = get_beijing_time()
+    started_at = crawled_at
+    headline_count = 0
+
+    try:
+        with get_db_connection() as conn:
+            for source_platform_id, title_data in results.items():
+                source_name = id_to_name.get(source_platform_id, source_platform_id)
+                source_id = get_or_create_source(conn, source_platform_id, source_name)
+
+                for title, info in title_data.items():
+                    cleaned_title = clean_title(title)
+
+                    if isinstance(info, dict):
+                        ranks = info.get("ranks", [])
+                        url = info.get("url", "")
+                        mobile_url = info.get("mobileUrl", "")
+                    else:
+                        ranks = info if isinstance(info, list) else []
+                        url = ""
+                        mobile_url = ""
+
+                    # 为每个rank记录一次出现
+                    for rank in ranks:
+                        upsert_headline(
+                            conn,
+                            source_id,
+                            cleaned_title,
+                            url,
+                            mobile_url,
+                            rank,
+                            crawled_at
+                        )
+                        headline_count += 1
+
+            # 记录爬取会话
+            save_crawl_session(
+                conn,
+                sources_success=list(results.keys()),
+                sources_failed=failed_ids,
+                headline_count=headline_count,
+                started_at=started_at
+            )
+
+        print(f"数据库保存成功: {headline_count} 条记录")
+        return headline_count
+
+    except Exception as e:
+        print(f"数据库保存失败: {e}")
+        return 0
+
+
+def read_all_today_titles_from_db(
+    current_platform_ids: Optional[List[str]] = None,
+) -> Tuple[Dict, Dict, Dict]:
+    """从数据库读取当天所有标题数据
+
+    Returns:
+        Tuple of (all_results, id_to_name, title_info) matching the format from read_all_today_titles
+    """
+    try:
+        from db import get_db_connection, get_today_headlines
+    except ImportError:
+        print("警告: 数据库模块未安装，回退到文件读取")
+        return read_all_today_titles(current_platform_ids)
+
+    # Get today's start timestamp (Beijing time)
+    tz = pytz.timezone("Asia/Shanghai")
+    now = datetime.now(tz)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    all_results = {}
+    id_to_name = {}
+    title_info = {}
+
+    try:
+        with get_db_connection() as conn:
+            # Get platform IDs to query
+            platform_ids = current_platform_ids or []
+            if not platform_ids:
+                # Get all active platforms from DB
+                from db.repository import get_all_sources
+                sources = get_all_sources(conn)
+                platform_ids = [s['platform_id'] for s in sources]
+
+            # Get headlines from DB
+            headlines = get_today_headlines(conn, platform_ids, today_start)
+
+            # Transform DB format to match file-based format
+            for headline in headlines:
+                source_id = headline['platform_id']
+                source_name = headline['platform_name']
+                title = headline['title']
+                url = headline['url'] or ""
+                mobile_url = headline['mobile_url'] or ""
+                ranks = list(headline['ranks']) if headline['ranks'] else []
+                first_seen = headline['first_seen_at']
+                last_seen = headline['last_seen_at']
+                occurrence_count = headline['occurrence_count']
+
+                # Update id_to_name
+                id_to_name[source_id] = source_name
+
+                # Initialize source in all_results if needed
+                if source_id not in all_results:
+                    all_results[source_id] = {}
+                    title_info[source_id] = {}
+
+                # Add title data
+                all_results[source_id][title] = {
+                    "ranks": ranks,
+                    "url": url,
+                    "mobileUrl": mobile_url,
+                }
+
+                # Add title info (timestamps as formatted strings)
+                first_time = first_seen.strftime("%H时%M分") if first_seen else ""
+                last_time = last_seen.strftime("%H时%M分") if last_seen else ""
+
+                title_info[source_id][title] = {
+                    "first_time": first_time,
+                    "last_time": last_time,
+                    "count": occurrence_count,
+                    "ranks": ranks,
+                    "url": url,
+                    "mobileUrl": mobile_url,
+                }
+
+        return all_results, id_to_name, title_info
+
+    except Exception as e:
+        print(f"数据库读取失败: {e}，回退到文件读取")
+        return read_all_today_titles(current_platform_ids)
+
+
+def detect_new_titles_from_db(
+    current_platform_ids: List[str],
+    last_push_time: Optional[datetime] = None
+) -> Tuple[Dict, Dict]:
+    """从数据库检测新标题
+
+    Args:
+        current_platform_ids: 平台ID列表
+        last_push_time: 上次推送时间
+
+    Returns:
+        Tuple of (new_titles_by_source, id_to_name)
+    """
+    try:
+        from db import get_db_connection, get_new_headlines_since
+    except ImportError:
+        print("警告: 数据库模块未安装")
+        return {}, {}
+
+    if last_push_time is None:
+        # Default to 30 minutes ago
+        tz = pytz.timezone("Asia/Shanghai")
+        last_push_time = datetime.now(tz) - timedelta(minutes=30)
+
+    new_titles = {}
+    id_to_name = {}
+
+    try:
+        with get_db_connection() as conn:
+            headlines = get_new_headlines_since(conn, current_platform_ids, last_push_time)
+
+            for headline in headlines:
+                source_id = headline['platform_id']
+                source_name = headline['platform_name']
+                title = headline['title']
+                url = headline['url'] or ""
+                mobile_url = headline['mobile_url'] or ""
+                ranks = list(headline['ranks']) if headline['ranks'] else []
+
+                id_to_name[source_id] = source_name
+
+                if source_id not in new_titles:
+                    new_titles[source_id] = {}
+
+                new_titles[source_id][title] = {
+                    "ranks": ranks,
+                    "url": url,
+                    "mobileUrl": mobile_url,
+                }
+
+        return new_titles, id_to_name
+
+    except Exception as e:
+        print(f"数据库查询新标题失败: {e}")
+        return {}, {}
 
 
 def load_frequency_words(
@@ -4013,6 +4222,9 @@ class NewsAnalyzer:
 
         title_file = save_titles_to_file(results, id_to_name, failed_ids)
         print(f"标题已保存到: {title_file}")
+
+        # 同时保存到数据库
+        save_titles_to_db(results, id_to_name, failed_ids)
 
         return results, id_to_name, failed_ids
 
