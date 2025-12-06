@@ -1,1 +1,13 @@
+# Environment files with secrets (not .env.example)
 .env
+!*.env.example
+docker/.env
+web/.env
+
+# Node
+node_modules/
+.next/
+
+# Python
+__pycache__/
+*.pyc
